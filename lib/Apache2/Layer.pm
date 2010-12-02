@@ -254,7 +254,7 @@ Enable use of L<"DocumentRootLayers">.
 Remove the path specified in E<lt>LocationE<gt>, E<lt>LocationMatchE<gt> from
 the URI before searching for layered file.
 
-That allows to simplify the file hieratchy tree, eg.  
+That allows to simplify the file hierarchy tree, eg.  
 
     <Location "/images">
         DocumentRootLayersStripLocation On
