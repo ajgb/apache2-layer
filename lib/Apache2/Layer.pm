@@ -5,8 +5,10 @@ package Apache2::Layer;
 
 use Apache2::Const -compile => qw(
     ACCESS_CONF RSRC_CONF
-    TAKE1 ITERATE
+    FLAG ITERATE
     OK DECLINED
+
+    NOT_IN_DIR_LOC_FILE NOT_IN_LOCATION 
 );
 use APR::Const -compile => qw(FINFO_NORM);
 
@@ -34,62 +36,80 @@ my @directives = (
         name         => 'EnableDocumentRootLayers',
         func         => __PACKAGE__ . '::_EnableDocumentRootLayersParam',
         req_override => Apache2::Const::RSRC_CONF | Apache2::Const::ACCESS_CONF,
-        args_how     => Apache2::Const::TAKE1,
+        args_how     => Apache2::Const::FLAG,
         errmsg       => 'EnableDocumentRootLayers On|Off',
+    },
+    {
+        name         => 'DocumentRootLayersStripLocation',
+        func         => __PACKAGE__ . '::_DocumentRootLayersStripLocationParam',
+        req_override => Apache2::Const::RSRC_CONF | Apache2::Const::ACCESS_CONF,
+        args_how     => Apache2::Const::FLAG,
+        errmsg       => 'DocumentRootLayersStripLocation On|Off',
     },
 );
 Apache2::Module::add(__PACKAGE__, \@directives);
 Apache2::ServerUtil->server->push_handlers(PerlTransHandler => ['Apache2::Layer::handler'] );
 
 sub _merge_cfg {
-    return bless { %{$_[0]}, %{$_[1]} }, ref $_[0];
+    return bless {
+        DocumentRootLayersStripLocation => 1,
+        %{$_[0]}, %{$_[1]}
+    }, ref $_[0];
 }
 
 sub DIR_MERGE { _merge_cfg(@_) }
 sub SERVER_MERGE { _merge_cfg(@_) }
 
-{
-    my @forbidden = qw(
-        <Directory
-        <DirectoryMatch
-        <Files
-        <FilesMatch
-    );
+sub _check_cmd_context {
+    my $params = shift;
 
-    sub _check_cmd_context {
-        my $directive = shift;
+    if ( $params->check_cmd_context(
+            Apache2::Const::NOT_IN_DIR_LOC_FILE
+            & ~Apache2::Const::NOT_IN_LOCATION
+        )
+    ) {
+        my $dir = $params->directive;
 
-        my $cmd = $directive->directive;
-
-        while ( my $parent = $directive->parent ) {
-            for ( @forbidden ) {
-                die "$cmd not allowed within $_ ...>\n"
-                    if $parent->directive eq $_;
-            }
-            $directive = $parent;
-        }
-
-        return 0;
+        die $dir->directive," not allowed in ",
+            $dir->parent->directive, " ...> context\n";
     }
+}
+
+# workaround the bug in mod_perl, that does not set to correct
+# $r->location if only custom directives have been used within
+# nested paths in <Location|LocationMatch>
+sub _set_location_path {
+    my ($self, $path) = @_;
+
+    $self->{LocationPath} = $path
+        if $path;
 }
 
 sub _DocumentRootLayersParam {
     my ($self, $params, $path) = @_;
 
-    _check_cmd_context($params->directive);
+    _check_cmd_context($params);
 
     push @{ $self->{DocumentRootLayers} }, $path;
+    $self->_set_location_path( $params->path );
 }
 
 sub _EnableDocumentRootLayersParam {
     my ($self, $params, $flag) = @_;
 
-    _check_cmd_context($params->directive);
+    _check_cmd_context($params);
 
-    die "EnableDocumentRootLayers On|Off, not $flag\n"
-        unless $flag =~ /^(?:On|Off)$/;
+    $self->{DocumentRootLayersEnabled} = $flag;
+    $self->_set_location_path( $params->path );
+}
 
-    $self->{DocumentRootLayersEnabled} = $flag eq 'On' ? 1 : 0;
+sub _DocumentRootLayersStripLocationParam {
+    my ($self, $params, $flag) = @_;
+
+    _check_cmd_context($params);
+
+    $self->{DocumentRootLayersStripLocation} = $flag;
+    $self->_set_location_path( $params->path );
 }
 
 sub handler {
@@ -104,11 +124,21 @@ sub handler {
 
     if ( my $paths = $dir_cfg->{DocumentRootLayers} ) {
         for my $dir ( @$paths ) {
+            my $uri = $r->uri;
+            # not defined means On
+            if ( ! defined $dir_cfg->{DocumentRootLayersStripLocation}
+                    ||
+                 $dir_cfg->{DocumentRootLayersStripLocation}
+            ) {
+                if ( my $path = $dir_cfg->{LocationPath} ) {
+                    $uri =~ s/^$path//;
+                }
+            }
             my $file = File::Spec->canonpath(
                 File::Spec->catfile(
                     File::Spec->file_name_is_absolute($dir) ?
                         $dir : File::Spec->catdir( $r->document_root, $dir ),
-                    $r->uri
+                    $uri
                 )
             );
 
@@ -141,6 +171,9 @@ sub handler {
     # enable layers for whole server
     EnableDocumentRootLayers On
 
+    # disable location strip
+    DocumentRootLayersStripLocation Off
+
     # paths are relative to DocumentRoot
     DocumentRootLayers layered/christmas layered/promotions
 
@@ -161,6 +194,19 @@ sub handler {
             EnableDocumentRootLayers On
             DocumentRootLayers images_v3 images_v2
         </LocationMatch>
+
+
+        <Location "/images">
+            DocumentRootLayersStripLocation On
+        </Location>
+
+        <Location "/images/company1">
+            DocumentRootLayers company1/images default/images
+        </Location>
+
+        <Location "/images/company2">
+            DocumentRootLayers company2/images default/images
+        </Location>
 
     </VirtualHost>
 
@@ -198,6 +244,47 @@ following directives:
     Context:  server config, virtual host, <Location*
 
 Enable use of L<"DocumentRootLayers">.
+
+=head2 DocumentRootLayersStripLocation
+
+    Syntax:   DocumentRootLayersStripLocation On|Off
+    Default:  DocumentRootLayersStripLocation On
+    Context:  server config, virtual host, <Location*
+
+Remove the path specified in E<lt>LocationE<gt>, E<lt>LocationMatchE<gt> from
+the URI before searching for layered file.
+
+That allows to simplify the file hieratchy tree, eg.  
+
+    <Location "/images">
+        DocumentRootLayersStripLocation On
+    </Location>
+
+    <Location "/images/company1">
+        DocumentRootLayers company1/images default/images
+    </Location>
+
+    <Location "/images/company2">
+        DocumentRootLayers company2/images default/images
+    </Location>
+
+for following requests:
+
+    /images/company1/headers/top.png 
+
+    /images/company2/headers/top.png 
+
+those paths would be searched:
+
+   company1/images/headers/top.png default/images/headers/top.png 
+
+   company2/images/headers/top.png default/images/headers/top.png 
+
+but with C<DocumentRootLayersStripLocation Off>:
+
+   company1/images/images/company1/headers/top.png default/images/images/company1/headers/top.png
+
+   company2/images/images/company2/headers/top.png default/images/images/company2/headers/top.png
 
 =head2 DocumentRootLayers
 

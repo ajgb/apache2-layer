@@ -2,7 +2,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 41;
+use Test::More tests => 43;
 use Test::NoWarnings;
 use Test::Httpd::Apache2;
 
@@ -41,6 +41,7 @@ my %hostnames = (
         },
         php => {
             'forms/form' => 'htdocs/layered/dev/php',
+            'forms/ng/form' => 'htdocs/layered/dev/php-ng',
         },
         css => {
             'css/style' => 'htdocs/layered/dev',
@@ -85,10 +86,15 @@ SKIP: {
                 my $file_content;
                 {
                     local $/;
+                    my $fpath = $file;
+                    if ( $ext eq 'raw' ) {
+                        $fpath = 'noargs.php';
+                    } elsif ( $ext eq 'php' ) {
+                        $fpath = 'form.php';
+                    };
 
                     open(CONTENT, File::Spec->catfile(
-                            't', $path,
-                            $ext eq 'raw' ? 'noargs.php' : $file
+                            't', $path, $fpath
                         ));
                     $file_content = <CONTENT>;
                     close(CONTENT);
@@ -228,7 +234,7 @@ sub _make_httpd {
 
     my $HOSTPORT = $httpd->listen;
 
-    $httpd->custom_conf( <<"EOC" );
+    $httpd->custom_conf( <<EOC );
 
     DocumentRoot "$ServerRoot/htdocs"
 
@@ -238,6 +244,7 @@ sub _make_httpd {
     PerlLoadModule Apache2::Layer
 
     EnableDocumentRootLayers On
+    DocumentRootLayersStripLocation Off
 
     DocumentRootLayers layered/christmas $ServerRoot/htdocs/layered/newyearseve
 
@@ -270,7 +277,12 @@ sub _make_httpd {
         </Directory>
 
         <Location "/forms/">
+            DocumentRootLayersStripLocation On
             DocumentRootLayers php
+        </Location>
+
+        <Location "/forms/ng">
+            DocumentRootLayers php-ng
         </Location>
 
         <LocationMatch "\.png\$">
@@ -290,7 +302,6 @@ sub _make_httpd {
         PerlMapToStorageHandler Test::Apache2::Layer::MapStorage
         DocumentRootLayers $ServerRoot/htdocs/layered/noargs
     </VirtualHost>
-
 
 
 EOC
